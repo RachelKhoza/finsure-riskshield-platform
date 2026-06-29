@@ -16,6 +16,21 @@ The live endpoint is intentionally not committed to the public README because it
 - `pipelines/azure-pipelines.yml`: Azure DevOps pipeline for test/build/push, Terraform provisioning, production approval, deployment, and smoke test.
 - `docs/architecture.mmd`: Mermaid architecture diagram required by the assessment.
 
+## Architecture
+
+```mermaid
+flowchart LR
+  borrower["SME Loan Workflow"] -->|"POST /validate HTTPS + correlation ID"| app["Azure Container App\nRiskShield Integration API"]
+  app -->|"POST /v1/score HTTPS\nx-api-key + correlation ID"| vendor["RiskShield API"]
+  app -->|"versionless secret reference\nmanaged identity"| kv["Azure Key Vault\nriskshield-api-key"]
+  app -->|"pull image\nmanaged identity AcrPull"| acr["Azure Container Registry"]
+  app -->|"stdout JSON logs\nhealth/readiness probes"| logs["Log Analytics Workspace"]
+  logs --> appi["Application Insights\nmetrics, traces, alerts"]
+  ado["Azure DevOps Pipeline"] -->|"test, build, scan, push"| acr
+  ado -->|"terraform apply"| rg["Azure Resource Group\nContainer Apps, ACR, KV, Observability"]
+  ado -->|"masked secret variable"| kv
+```
+
 ## API
 
 `POST /validate`
@@ -149,148 +164,7 @@ Dev uses `min_replicas = 0` to reduce cost. Prod uses `min_replicas = 1` to avoi
 
 ## Azure DevOps
 
-Pipeline: `pipelines/azure-pipelines.yml`
-
-This repository is ready to run in Azure DevOps. Replace placeholder values such as `<azure-devops-org-url>` and `<subscription-name>` with environment-specific values during setup.
-
-### 1. Create The Azure DevOps Project
-
-1. Open `<azure-devops-org-url>`.
-2. Select **New project**.
-3. Use project name `finsure-riskshield-platform`.
-4. Set visibility to **Private**.
-5. Use **Git** for version control.
-6. Create the project.
-
-### 2. Install The Terraform Pipeline Task
-
-The YAML uses `TerraformInstaller@1`.
-
-1. In Azure DevOps, open **Organization settings**.
-2. Open **Extensions**.
-3. Install the **Terraform** extension from Microsoft DevLabs if it is not already installed.
-
-If your organisation does not allow marketplace extensions, replace the `TerraformInstaller@1` steps with your organisation's standard Terraform installer.
-
-### 3. Create Service Connections
-
-Go to **Project settings > Service connections**.
-
-Create an Azure Resource Manager service connection:
-
-- Type: **Azure Resource Manager**
-- Authentication: service principal / workload identity federation is preferred when available
-- Subscription: `<subscription-name>`
-- Name: `finsure-riskshield-azure`
-- Grant access permission to all pipelines: enabled
-
-Create an Azure Container Registry service connection:
-
-- Type: **Docker Registry**
-- Registry type: **Azure Container Registry**
-- Registry: `acrfinsurersdevsan001`
-- Name: `finsure-riskshield-acr`
-- Grant access permission to all pipelines: enabled
-
-The Azure service connection principal should use scoped permissions, not subscription-wide owner-style access. For the already bootstrapped dev environment, assign only the permissions needed to read/write Terraform state and manage the workload resource group.
-
-```bash
-SP_APP_ID="<azure-devops-service-connection-application-client-id>"
-SP_OBJECT_ID="$(az ad sp show --id "$SP_APP_ID" --query id -o tsv)"
-TFSTATE_STORAGE_ID="$(az storage account show \
-  --name "<tfstate-storage-account-name>" \
-  --resource-group "rg-finsure-tfstate" \
-  --query id -o tsv)"
-WORKLOAD_RG_ID="$(az group show \
-  --name "rg-finsure-rs-dev-san-001" \
-  --query id -o tsv)"
-
-az role assignment create \
-  --assignee-object-id "$SP_OBJECT_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Data Contributor" \
-  --scope "$TFSTATE_STORAGE_ID"
-
-az role assignment create \
-  --assignee-object-id "$SP_OBJECT_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Contributor" \
-  --scope "$WORKLOAD_RG_ID"
-
-az role assignment create \
-  --assignee-object-id "$SP_OBJECT_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "User Access Administrator" \
-  --scope "$WORKLOAD_RG_ID"
-```
-
-If the pipeline must create the workload resource group from zero, use a short-lived bootstrap grant at subscription scope, apply Terraform once, then reduce the service connection to the scoped roles above.
-
-The same service principal also needs to set the Key Vault secret during the pipeline run:
-
-```bash
-SP_APP_ID="<azure-devops-service-connection-application-client-id>"
-SP_OBJECT_ID="$(az ad sp show --id "$SP_APP_ID" --query id -o tsv)"
-KEY_VAULT_ID="$(az keyvault show \
-  --name kv-finsure-rs-dev-001 \
-  --resource-group rg-finsure-rs-dev-san-001 \
-  --query id -o tsv)"
-
-az role assignment create \
-  --assignee-object-id "$SP_OBJECT_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Key Vault Secrets Officer" \
-  --scope "$KEY_VAULT_ID"
-```
-
-### 4. Create Variable Groups
-
-Go to **Pipelines > Library** and create these variable groups.
-
-`finsure-riskshield-shared`
-
-| Variable | Value |
-| --- | --- |
-| `azureServiceConnection` | `finsure-riskshield-azure` |
-| `acrServiceConnection` | `finsure-riskshield-acr` |
-| `acrLoginServer` | `acrfinsurersdevsan001.azurecr.io` |
-| `riskShieldSecretName` | `riskshield-api-key` |
-| `approvalNotifyUsers` | your Azure DevOps email address |
-
-`finsure-riskshield-dev`
-
-| Variable | Value |
-| --- | --- |
-| `RiskShieldApiKey` | mark as secret; use the real vendor key or `demo-riskshield-key` for demo |
-
-`finsure-riskshield-prod`
-
-| Variable | Value |
-| --- | --- |
-| `RiskShieldApiKey` | mark as secret; use the production vendor key when available |
-
-### 5. Create Pipeline Environments
-
-Go to **Pipelines > Environments**.
-
-Create:
-
-- `finsure-riskshield-dev`
-- `finsure-riskshield-prod`
-
-For `finsure-riskshield-prod`, add an approval check so production deploys require manual approval.
-
-### 6. Create The Pipeline
-
-1. Go to **Pipelines > New pipeline**.
-2. Select **GitHub** if this repo is hosted in GitHub, or **Azure Repos Git** if you imported it into Azure Repos.
-3. Select the repository.
-4. Choose **Existing Azure Pipelines YAML file**.
-5. Select `/pipelines/azure-pipelines.yml`.
-6. Save and run.
-7. Choose `dev` for the `environment` parameter.
-
-The pipeline will:
+The assessment requires Azure DevOps, so the YAML is included at `pipelines/azure-pipelines.yml`. It automates the same flow used during manual validation:
 
 1. Run Node.js tests.
 2. Build and push the Docker image to ACR.
@@ -299,28 +173,22 @@ The pipeline will:
 5. Deploy the Container App.
 6. Smoke test `/healthz`.
 
-If a new Azure DevOps organisation reports no Microsoft-hosted parallelism, request the free hosted agent grant from Microsoft or configure a self-hosted agent. The YAML itself does not need to change.
+Required pipeline inputs:
 
-### 7. Backend File Names
+- Service connection: `azureServiceConnection`
+- ACR service connection: `acrServiceConnection`
+- ACR login server: `acrLoginServer`
+- Secret variable: `RiskShieldApiKey`
+- Secret name variable: `riskShieldSecretName`
 
-The pipeline expects backend config files with dot-separated names:
+Backend config files must match the names referenced by the pipeline:
 
-- `terraform/backend.foundation.dev.hcl`
-- `terraform/backend.foundation.prod.hcl`
 - `terraform/backend.app.dev.hcl`
 - `terraform/backend.app.prod.hcl`
+- `terraform/backend.foundation.dev.hcl`
+- `terraform/backend.foundation.prod.hcl`
 
-Keep these names aligned with `pipelines/azure-pipelines.yml`; otherwise `terraform init` will fail.
-
-### 8. Current Dev Values
-
-Existing Azure dev resources created during validation:
-
-- Resource group: `rg-finsure-rs-dev-san-001`
-- ACR: `acrfinsurersdevsan001`
-- Key Vault: `kv-finsure-rs-dev-001`
-- Container App: `ca-finsure-rs-dev-san-001`
-- App URL: provide separately during review; do not commit public internet-facing endpoints.
+Use scoped Azure permissions for the service connection where possible: state storage access on the Terraform backend storage account, contributor access on the workload resource group, and Key Vault secret write access only on the project vault.
 
 ## Security Considerations
 
