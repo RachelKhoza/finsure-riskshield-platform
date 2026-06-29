@@ -103,21 +103,23 @@ Image notes:
 Terraform state is stored in Azure Storage. Bootstrap once:
 
 ```bash
+TFSTATE_STORAGE_ACCOUNT="stfinsure1782670901"
+
 az group create -n rg-finsure-tfstate -l southafricanorth
 az storage account create \
   -g rg-finsure-tfstate \
-  -n stfinsuretfstate001 \
+  -n "$TFSTATE_STORAGE_ACCOUNT" \
   -l southafricanorth \
   --sku Standard_LRS \
   --https-only true \
   --min-tls-version TLS1_2
 az storage container create \
-  --account-name stfinsuretfstate001 \
+  --account-name "$TFSTATE_STORAGE_ACCOUNT" \
   -n tfstate \
   --auth-mode login
 ```
 
-Storage account names are globally unique, so adjust `stfinsuretfstate001` in the backend files if it is already taken. The tfvars default to `southafricanorth` for South African data residency; change `location` if Container Apps is not enabled for your subscription in that region.
+The backend files currently use `stfinsure1782670901`. If you choose a different globally unique storage account name, update `storage_account_name` in all `terraform/backend.*.hcl` files before running `terraform init`. The tfvars default to `southafricanorth` for South African data residency; change `location` if Container Apps is not enabled for your subscription in that region.
 
 Deploy foundation:
 
