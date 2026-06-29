@@ -1,0 +1,10 @@
+flowchart LR
+  borrower["SME Loan Workflow"] -->|"POST /validate HTTPS + correlation ID"| app["Azure Container App\nRiskShield Integration API"]
+  app -->|"POST /v1/score HTTPS\nx-api-key + correlation ID"| vendor["RiskShield API"]
+  app -->|"versionless secret reference\nmanaged identity"| kv["Azure Key Vault\nriskshield-api-key"]
+  app -->|"pull image\nmanaged identity AcrPull"| acr["Azure Container Registry"]
+  app -->|"stdout JSON logs\nhealth/readiness probes"| logs["Log Analytics Workspace"]
+  logs --> appi["Application Insights\nmetrics, traces, alerts"]
+  ado["Azure DevOps Pipeline"] -->|"test, build, scan, push"| acr
+  ado -->|"terraform apply"| rg["Azure Resource Group\nContainer Apps, ACR, KV, Observability"]
+  ado -->|"masked secret variable"| kv
