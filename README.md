@@ -2,12 +2,11 @@
 
 Assessment-ready implementation for a secure vendor payment risk scoring integration on Azure.
 
-## Live Dev Deployment
+## Live Dev Validation
 
-- Health: <https://ca-finsure-rs-dev-san-001.wonderfulsea-88f4e2f8.southafricanorth.azurecontainerapps.io/healthz>
-- Readiness: <https://ca-finsure-rs-dev-san-001.wonderfulsea-88f4e2f8.southafricanorth.azurecontainerapps.io/readyz>
+The dev environment has been validated on Azure Container Apps in `southafricanorth`. It uses ACR for the container image, Key Vault for the RiskShield API key, managed identity for secret access, and Log Analytics/Application Insights for observability.
 
-The dev environment is deployed to Azure Container Apps in `southafricanorth`. It uses ACR for the container image, Key Vault for the RiskShield API key, managed identity for secret access, and Log Analytics/Application Insights for observability.
+The live endpoint is intentionally not committed to the public README because it is internet-exposed. During review, provide the health/readiness URLs separately or tear the environment down after the review window.
 
 ## What Is Included
 
@@ -15,22 +14,7 @@ The dev environment is deployed to Azure Container Apps in `southafricanorth`. I
 - `app/Dockerfile`: multi-stage production image, non-root runtime user, Alpine base, health check, no application dependencies.
 - `terraform/`: reusable Azure modules and dev/prod stacks for Container Apps, ACR, Key Vault, managed identity, Log Analytics, and Application Insights. Container App logs are sent through the Container Apps Environment Log Analytics integration.
 - `pipelines/azure-pipelines.yml`: Azure DevOps pipeline for test/build/push, Terraform provisioning, production approval, deployment, and smoke test.
-- `docs/architecture.mmd`: Mermaid architecture diagram.
-
-## Architecture
-
-```mermaid
-flowchart LR
-  borrower["SME Loan Workflow"] -->|"POST /validate HTTPS + correlation ID"| app["Azure Container App\nRiskShield Integration API"]
-  app -->|"POST /v1/score HTTPS\nx-api-key + correlation ID"| vendor["RiskShield API"]
-  app -->|"versionless secret reference\nmanaged identity"| kv["Azure Key Vault\nriskshield-api-key"]
-  app -->|"pull image\nmanaged identity AcrPull"| acr["Azure Container Registry"]
-  app -->|"stdout JSON logs\nhealth/readiness probes"| logs["Log Analytics Workspace"]
-  logs --> appi["Application Insights\nmetrics, traces, alerts"]
-  ado["Azure DevOps Pipeline"] -->|"test, build, scan, push"| acr
-  ado -->|"terraform apply"| rg["Azure Resource Group\nContainer Apps, ACR, KV, Observability"]
-  ado -->|"masked secret variable"| kv
-```
+- `docs/architecture.mmd`: Mermaid architecture diagram required by the assessment.
 
 ## API
 
@@ -167,11 +151,11 @@ Dev uses `min_replicas = 0` to reduce cost. Prod uses `min_replicas = 1` to avoi
 
 Pipeline: `pipelines/azure-pipelines.yml`
 
-This repository is ready to run in Azure DevOps at `https://dev.azure.com/maleterachel/`.
+This repository is ready to run in Azure DevOps. Replace placeholder values such as `<azure-devops-org-url>` and `<subscription-name>` with environment-specific values during setup.
 
 ### 1. Create The Azure DevOps Project
 
-1. Open <https://dev.azure.com/maleterachel/>.
+1. Open `<azure-devops-org-url>`.
 2. Select **New project**.
 3. Use project name `finsure-riskshield-platform`.
 4. Set visibility to **Private**.
@@ -196,7 +180,7 @@ Create an Azure Resource Manager service connection:
 
 - Type: **Azure Resource Manager**
 - Authentication: service principal / workload identity federation is preferred when available
-- Subscription: `Azure subscription 1`
+- Subscription: `<subscription-name>`
 - Name: `finsure-riskshield-azure`
 - Grant access permission to all pipelines: enabled
 
@@ -208,25 +192,39 @@ Create an Azure Container Registry service connection:
 - Name: `finsure-riskshield-acr`
 - Grant access permission to all pipelines: enabled
 
-The Azure service connection principal needs enough permission to run Terraform. For this assessment/dev deployment, assign it `Contributor` and `User Access Administrator` on the subscription so Terraform can create resources and role assignments. After assessment, reduce this to narrower resource-group scopes.
+The Azure service connection principal should use scoped permissions, not subscription-wide owner-style access. For the already bootstrapped dev environment, assign only the permissions needed to read/write Terraform state and manage the workload resource group.
 
 ```bash
-SUBSCRIPTION_ID="2a3014bb-4487-4706-ad3d-94569ac6ecaf"
 SP_APP_ID="<azure-devops-service-connection-application-client-id>"
 SP_OBJECT_ID="$(az ad sp show --id "$SP_APP_ID" --query id -o tsv)"
+TFSTATE_STORAGE_ID="$(az storage account show \
+  --name "<tfstate-storage-account-name>" \
+  --resource-group "rg-finsure-tfstate" \
+  --query id -o tsv)"
+WORKLOAD_RG_ID="$(az group show \
+  --name "rg-finsure-rs-dev-san-001" \
+  --query id -o tsv)"
+
+az role assignment create \
+  --assignee-object-id "$SP_OBJECT_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Storage Blob Data Contributor" \
+  --scope "$TFSTATE_STORAGE_ID"
 
 az role assignment create \
   --assignee-object-id "$SP_OBJECT_ID" \
   --assignee-principal-type ServicePrincipal \
   --role "Contributor" \
-  --scope "/subscriptions/$SUBSCRIPTION_ID"
+  --scope "$WORKLOAD_RG_ID"
 
 az role assignment create \
   --assignee-object-id "$SP_OBJECT_ID" \
   --assignee-principal-type ServicePrincipal \
   --role "User Access Administrator" \
-  --scope "/subscriptions/$SUBSCRIPTION_ID"
+  --scope "$WORKLOAD_RG_ID"
 ```
+
+If the pipeline must create the workload resource group from zero, use a short-lived bootstrap grant at subscription scope, apply Terraform once, then reduce the service connection to the scoped roles above.
 
 The same service principal also needs to set the Key Vault secret during the pipeline run:
 
@@ -303,7 +301,18 @@ The pipeline will:
 
 If a new Azure DevOps organisation reports no Microsoft-hosted parallelism, request the free hosted agent grant from Microsoft or configure a self-hosted agent. The YAML itself does not need to change.
 
-### 7. Current Dev Values
+### 7. Backend File Names
+
+The pipeline expects backend config files with dot-separated names:
+
+- `terraform/backend.foundation.dev.hcl`
+- `terraform/backend.foundation.prod.hcl`
+- `terraform/backend.app.dev.hcl`
+- `terraform/backend.app.prod.hcl`
+
+Keep these names aligned with `pipelines/azure-pipelines.yml`; otherwise `terraform init` will fail.
+
+### 8. Current Dev Values
 
 Existing Azure dev resources created during validation:
 
@@ -311,7 +320,7 @@ Existing Azure dev resources created during validation:
 - ACR: `acrfinsurersdevsan001`
 - Key Vault: `kv-finsure-rs-dev-001`
 - Container App: `ca-finsure-rs-dev-san-001`
-- App URL: <https://ca-finsure-rs-dev-san-001.wonderfulsea-88f4e2f8.southafricanorth.azurecontainerapps.io>
+- App URL: provide separately during review; do not commit public internet-facing endpoints.
 
 ## Security Considerations
 
